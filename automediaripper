@@ -1,0 +1,869 @@
+#!/bin/bash
+
+### AutoMediaRipper v.0.95 MINIMAL VERBOSE VERSION - Tobias Hellgren <hellgren dot tobias at gmail dot com> ##################
+#
+# USAGE:
+# - Just pop in a disc and run!
+#
+# IMPORTANT USAGE NOTES:
+# - Please read chapter 4 in README for important notes!
+# - Always read README first!
+
+#####################################################################################################
+# LET THE MAGIC BEGIN!
+
+if [[ $(whoami) == "root" ]]; then HOME=/root; else HOME=/home/$(whoami); fi
+
+VERSION=0.95
+echo "-- AUTOMEDIARIPPER version $VERSION ~ MVV Edition --" | tee "$HOME"/automediaripper.log
+date >> "$HOME"/automediaripper.log
+
+function cleanup {
+  trap 'exit 0' TERM
+
+  echo "+ Moving results into destination: $DESTINATION" | tee -a "$HOME"/automediaripper.log
+  cp $COPYARGS "$SOURCE" "$DESTINATION"
+
+# Play a nice fanfare when done
+  fanfare
+  if [[ ! "$MEDIA" = "File" ]]; then eject "$DRIVE"; fi
+  echo "+ All done. You have a nice day, now."
+
+#  rm "$TEMPDIR" -rf
+#  rmdir "$(echo ${TEMPDIR/tmp.*})"
+  exit 0
+}
+
+function error {
+  trap 'exit 0' TERM
+
+# Shit, a dead end!
+  error_beep
+  if [[ ! "$MEDIA" = "File" ]]; then eject "$DRIVE"; fi
+  echo -e "\n- ERROR: Something went horribly wrong, please check log!"
+  exit 1
+}
+
+trap error INT TERM
+
+
+
+function automediaripper_config {
+if [[ -f "$HOME/.automediaripperrc" ]]; then return; fi
+
+# Adding default settings
+cat > "$HOME/.automediaripperrc" <<EOF
+## AUTOMEDIARIPPER VERSION $VERSION CONFIGURATION
+## Default paths and settings, please edit
+
+TEMPDIR="$HOME/.tmp/automediaripper"
+DRIVE="/dev/dvd"
+
+OUTPUT_DVD="$HOME/Video/Movies"
+OUTPUT_TV="$HOME/Video/TV"
+OUTPUT_CD="$HOME/Music"
+
+HBPRESET_MOVIE="High Profile"
+HBPRESET_TV="Normal"
+MOVIE_QUALITY="High"
+TV_QUALITY="Medium"
+EXTRAARGS_MOVIE="--decomb --detelecine"
+EXTRAARGS_TV="-E mp3 -Q 7 --decomb --detelecine"
+
+LANGUAGES="eng spa fra und"
+UNWANTED_DUBS="fra"
+NATIVE="eng"
+SECONDARY="spa"
+
+DOWNMIX=1
+DOWNSCALE=1
+
+PASSTHRU=0
+RIPONLY=0
+
+MUSIC_FORMAT="MP3"
+MUSIC_QUALITY="Medium"
+EOF
+
+
+# Loading binary paths for required software
+if [[ $(which HandBrakeCLI handbrakecli | tail -1) ]]; then
+  echo -e "\n## Detected required software, edit only if you need specific version\n" >> "$HOME/.automediaripperrc"
+  echo "HANDBRAKECLI=$(which HandBrakeCLI handbrakecli | tail -1)" >> "$HOME/.automediaripperrc"
+else
+  echo "- ERROR: HandBrakeCLI not found! Please install." | tee -a "$HOME"/automediaripper.log
+  error_beep
+  exit 1
+fi
+
+for PROGRAM in isoinfo lsdvd lynx makemkvcon icedax glyrc lame flac oggenc vorbiscomment udisks; do
+  if [[ $(which $PROGRAM) ]]; then
+    echo "$(echo "${PROGRAM^^}=$(which $PROGRAM)")" >> "$HOME/.automediaripperrc"
+  else
+    echo "- ERROR: $PROGRAM not found! Please install." | tee -a "$HOME"/automediaripper.log
+    error_beep
+    exit 1
+  fi
+done
+
+echo -e "Created new config file at $HOME/.automediaripperrc\nPlease edit before usage!"
+exit 0
+}
+
+
+
+function prerequisites {
+# Does our tmp already exist? If so, clean up!
+if [ -d "$TEMPDIR" ]; then rm "$TEMPDIR" -rf; mkdir -p "$TEMPDIR"; else mkdir -p "$TEMPDIR"; fi
+TEMPDIR=$(mktemp -d -p "$TEMPDIR")
+
+# Does our target directories exist?
+if [[ ! -d $OUTPUT_DVD ]] || [[ ! -d $OUTPUT_TV ]] || [[ ! -d $OUTPUT_CD ]]; then
+  echo "- ERROR: Target folder(s) does not exist! Please create first." | tee -a "$HOME"/automediaripper.log
+  error_beep
+  exit 1
+fi
+
+}
+
+
+
+# Sound notifications for headless setups
+
+function fanfare { beep -f 659 -l 460 -n -f 784 -l 340 -n -f 659 -l 230 -n -f 659 -l 110 -n -f 880 -l 230 -n -f 659 -l 230 -n -f 587 -l 230 -n -f 659 -l 460 -n -f 988 -l 340 -n -f 659 -l 230 -n -f 659 -l 110 -n -f 1047-l 230 -n -f 988 -l 230 -n -f 784 -l 230 -n -f 659 -l 230 -n -f 988 -l 230 -n -f 1318 -l 230 -n -f 659 -l 110 -n -f 587 -l 230 -n -f 587 -l 110 -n -f 494 -l 230 -n -f 740 -l 230 -n -f 659 -l 460 &>/dev/null; }
+function error_beep { beep -f 400 -r 4 -l 120 &>/dev/null; sleep 0.1; beep -f 200 -l 10 -r 8 &>/dev/null; sleep 0.1; beep -f 400 -r 4 -l 120 &>/dev/null; sleep 0.1; passibeep -f 200 -l 10 -r 8 &>/dev/null; sleep 0.1; }
+function notify { beep -f 4000 -r 20 -l 10 &>/dev/null; }
+function start_notification { beep -f 200 -l 50 &>/dev/null; beep -f 300 -l 50 &>/dev/null; beep -f 400 -l 50 &>/dev/null; beep -f 200 -l 50 &>/dev/null; beep -f 300 -l 50 &>/dev/null; beep -f 400 -l 50 &>/dev/null; }
+
+# Uncomment and place WAVs in /usr/share/automediaripper if no PC speaker
+
+#function fanfare { aplay /usr/share/automediaripper/done.wav &>/dev/null; }
+#function start_notification { aplay /usr/share/automediaripper/start.wav &>/dev/null; }
+#function error_beep { aplay /usr/share/automediaripper/error.wav &>/dev/null; }
+#function notify { aplay /usr/share/automediaripper/notify.wav &>/dev/null; }
+
+function check_drive {
+
+if [[ -f "$INPUT" ]]; then
+  MEDIA="File"
+else
+
+# Injecting disc and wait 5 seconds...
+  eject -t "$DRIVE" &>/dev/null && sleep 5
+
+# If not authorized, then user is mostly likely on remote connection
+  if [[ $($UDISKS --mount "$DRIVE" | grep -o "Mount failed: Not Authorized") ]]; then
+    echo -e "- ERROR: Non-authorized mount, either run script locally or as root. Aborting..." | tee -a "$HOME"/automediaripper.log
+    error_beep
+    exit 1
+  fi
+
+# Let's mount! First, check if tray is empty
+  if [[ $($UDISKS --mount "$DRIVE" | grep -o "no medium found") ]]; then
+
+# Retry mount for 30 seconds
+    while [[ $($UDISKS --mount "$DRIVE" | grep -o "no medium found") ]] && [[ ! $SLEEP -eq 30 ]]; do
+      sleep 5
+      SLEEP=$((SLEEP+5))
+    done
+
+  if [[ $SLEEP -eq 30 ]]; then
+    echo -e "- ERROR: No disc in tray! Aborting..." | tee -a "$HOME"/automediaripper.log
+    error_beep
+    eject "$DRIVE"
+    exit 1
+  fi
+
+# Tray isn't empty let's procede
+  else
+
+# udisks can't mount disc, check if it's a CD!
+    if [[ $($UDISKS --mount "$DRIVE" | grep -o "can't read superblock") ]]; then
+      if [[ $("$ICEDAX" -D "$DRIVE" -N -H -d 1 2>&1 | grep -oP "recorded successfully") ]]; then MEDIA="CDDA"
+        else
+          echo -e "- ERROR: Cannot identify disc in tray! Aborting..." | tee -a "$HOME"/automediaripper.log
+          error_beep
+          eject "$DRIVE"
+          exit 1
+      fi
+
+    else
+
+# Wait until drive is mounted (if possible), retry for 30 seconds
+      while [[ ! $(df | grep "$DRIVE") ]] && [[ ! $SLEEP -eq 30 ]]; do
+        sleep 5
+        SLEEP=$((SLEEP+5))
+      done
+
+# Check if disc is DVD or Blu-ray
+      DRIVE_PATH="$(df | grep "$DRIVE" | cut -d% -f2 | sed -e 's/^ //g')"
+
+      if [[ $("$LSDVD" "$DRIVE" 2>&1 | tail -1) = "Can't open disc $DRIVE!" ]] || [[ $("$LSDVD" "$DRIVE" 2>&1 | tail -1) = "Can't open main ifo!" ]]; then
+        if [[ ! -d "$DRIVE_PATH/BDMV/STREAM" ]]; then
+          echo -e "- ERROR: This is neither a DVD or Blu-ray video nor CDDA music disc! Aborting..." | tee -a "$HOME"/automediaripper.log
+          error_beep
+          eject "$DRIVE"
+          exit 1
+        else
+          MEDIA="Blu-ray video"
+        fi
+      else
+        MEDIA="DVD video"
+      fi
+    fi
+  fi
+fi
+
+# Report media
+echo "+ Detected media: $MEDIA" | tee -a "$HOME"/automediaripper.log
+
+}
+
+
+function check_space {
+TEMPSPACE="$TEMPDIR"
+# Does our tmp have enough space?
+
+while [[ ! $(df $TEMPSPACE 2>/dev/null) ]]; do TEMPSPACE=${TEMPSPACE%/*}; done
+TEMPSPACE=$(df $TEMPSPACE | tail -1 | sed 's/  */;/g' | cut -d";" -f4)
+DRIVESPACE=$(df | grep "$DRIVE" | sed 's/  */;/g' | cut -d";" -f2)
+
+if [[ "$1" = "disney" ]]; then
+  if [[ $TEMPSPACE -lt $((DRIVESPACE*2)) ]]; then echo "- ERROR: These type of DVD's need at least double the size in free disk space. Aborting..." | tee -a "$HOME"/automediaripper.log; error_beep; exit 1; fi
+else
+  if [[ $TEMPSPACE -lt $DRIVESPACE ]]; then echo "- ERROR: No space left on device, please reconfigure! Aborting..." | tee -a "$HOME"/automediaripper.log; error_beep; exit 1; fi
+fi
+}
+
+
+
+### DVD/BLU-RAY RIPPING SECTION #########
+
+function video_identify {
+
+case $MEDIA in
+"DVD video")
+  VOLUMEID="$($ISOINFO -d -i "$DRIVE" | awk -F": " '/Volume id/{gsub(/_/," "); print $2}' | sed -e 's/SEASON.*//I;s/[ \t]*$//')"
+  SEASON="$($ISOINFO -d -i "$DRIVE" | awk -F": " '/Volume id/{gsub(/_/," "); print $2}' | grep -oPi '(?<=SEASON ).*' | sed 's/disc.*[0-9].*$//I;s/d[0-9].*$//I;s/[0-9]*d$//I;s/[ \t]*$//')"
+
+  # Checking if there's a season number
+  if [[ "$TYPE" = "TV" ]] &&  [[ -z "$SEASON" ]] || [[ "$SEASON" =~ [A-Za-z] ]]; then
+    notify
+    SEASON="XX"
+    echo -e "! Identified TV series, but not season! Filenames must be manually renamed." | tee -a "$HOME"/automediaripper.log
+  fi
+
+  if [[ "$VOLUMEID" = "DVDVOLUME" ]] || [[ "$VOLUMEID" = "DVD VIDEO" ]] || [[ "$VOLUMEID" = "DVD" ]]; then
+    notify
+    echo "! Disc volume ID has generic name, you will have to manually rename file!" | tee -a "$HOME"/automediaripper.log
+  fi
+;;
+
+# IF BLU-RAY: Grab as much information as possible
+"Blu-ray video")
+  BLURAYINFO=$("$MAKEMKVCON" -r info dev:"$DRIVE")
+
+  VOLUMEID=$(echo "$BLURAYINFO" | grep -oP '(?<=CINFO:2,0,).*' | sed 's/"//g')
+  BLURAY_TITLE_LENGTH=($(echo "$BLURAYINFO" | grep -oP '.*,9,0,".*([0-9]:[0-9][0-9]:[0-9][0-9]).*(?=")' | sed 's/.*"//g'))
+  BLURAY_TITLES=($(echo ${!BLURAY_TITLE_LENGTH[@]}))
+
+# Grabbing title length in minutes, grabbing chapters and removing titles that are shorter than 20 minutes to avoid grabbing menu animations
+  for BLURAY_TITLE in ${BLURAY_TITLES[@]}; do
+    BLURAY_TITLE_LENGTH[$BLURAY_TITLE]=$(( ($(echo ${BLURAY_TITLE_LENGTH[$BLURAY_TITLE]} | cut -d: -f1 | sed -r 's/^0([0-9])/\1/')*60)+$(echo ${BLURAY_TITLE_LENGTH[$BLURAY_TITLE]} | cut -d: -f2 | sed -r 's/^0([0-9])/\1/') ))
+    BLURAY_TITLE_CHAPTERS[$BLURAY_TITLE]=$(echo "$BLURAYINFO" | grep -oP "(?<=TINFO:$BLURAY_TITLE,8,0,\")[0-9]{1,2}(?=\")")
+    if [[ ${BLURAY_TITLE_LENGTH[$BLURAY_TITLE]} -lt 20 ]]; then unset BLURAY_TITLES[$BLURAY_TITLE] BLURAY_TITLE_LENGTH[$BLURAY_TITLE] BLURAY_TITLE_CHAPTERS[$BLURAY_TITLE]; fi
+  done
+
+# Grab the longest title that has less than 50 chapters (to avoid behind-the-scenes documentaries that might be longer than the actual movie)
+  LONGEST_LENGTH=$(echo ${BLURAY_TITLES[@]} | sed -r 's/(^[0-9])\s.*/\1/')
+  for i in "${!BLURAY_TITLE_LENGTH[@]}"; do if [[ ${BLURAY_TITLE_CHAPTERS[$i]} -lt 50 ]]; then (( "${BLURAY_TITLE_LENGTH[$i]}" > LONGEST_LENGTH )) && LONGEST_LENGTH="${BLURAY_TITLE_LENGTH[$i]}" LONGEST_TITLE="$i"; fi; done
+
+# Check if resolution is 1080p
+  if [[ $(echo "$BLURAYINFO" | grep "SINFO:$MAIN_VIDEO_TITLE,0,.*1920x1080") ]]; then RESOLUTION=1080; fi
+
+;;
+
+"File")
+  VOLUMEID=$(echo $(basename "${INPUT%.*}"))
+  RESOLUTION="$($HANDBRAKECLI -i $INPUT -t0 --scan 2>&1 | grep -oPm1 '(?<=1920x)1080')"
+  TYPE="MOVIE"
+  MAIN_VIDEO_TITLE=0
+;;
+
+esac
+
+}
+
+
+
+function video_imdb_lookup {
+# Skip if generic volume ID
+if [[ "$VOLUMEID" = "DVDVOLUME" ]] || [[ "$VOLUMEID" = "DVD VIDEO" ]] || [[ "$VOLUMEID" = "DVD" ]]; then return; fi
+
+VOLUMEID_STRING="${VOLUMEID,,}"; unset VOLUMEID && for WORD in $VOLUMEID_STRING; do VOLUMEID+="${WORD^} "; done
+VOLUMEID="$(echo $VOLUMEID | sed 's/[ \t]*$//')"
+
+# Trying to look up title on IMDb, this may or may not work correctly!
+BUFFER="$(sed -e 's/Disc [0-9].*$//g;s/D1$//g;s/1D$//g;' <<< $VOLUMEID)"
+GQUERY="http://www.google.com/search?hl=en&q=${BUFFER// /+}+$(if [[ ! "$SEASON" =~ [A-Za-z] ]]; then echo SEASON+$SEASON+; fi)site:imdb.com"
+IMDB=$($LYNX -dump "$GQUERY" 2>/dev/null | grep -oPm1 "http://www.imdb.com/title/tt[0-9]{1,7}/")
+
+if [[ ! $IMDB ]]; then
+  for i in ${BUFFER% *}; do
+    BUFFER="${BUFFER% *}"
+    QUERY="${BUFFER// /+}"
+    GQUERY="http://www.google.com/search?hl=en&q=$QUERY+site:imdb.com"
+    IMDB=$($LYNX -dump "$GQUERY" 2>/dev/null | grep -oPm1 "http://www.imdb.com/title/tt[0-9]{1,7}/")
+  done
+fi
+
+BUFFER=$($LYNX -source "$IMDB" 2>/dev/null | grep -oP '(?<=<title>).*(?=</title>)')
+
+if [[ "$BUFFER" =~ "TV Series" ]]; then
+  NEWTITLE=$(echo "$BUFFER" | sed -e 's/ (TV Series .*) .* IMDb//g' -e 's/[!@#\$%^&*()\/]/ /g')
+elif [[ "$BUFFER" =~ "Video Game" ]] || [[ "$BUFFER" =~ "Reviews" ]] || [[ "$BUFFER" =~ "Ratings" ]]; then
+  unset NEWTITLE
+else
+  NEWTITLE=$(echo "$BUFFER" | sed -e 's/ (.*) .* IMDb//g' -e 's/[!@#\$%^&*()\/]/ /g')
+fi
+
+if [[ $NEWTITLE ]]; then VOLUMEID="$NEWTITLE"; echo "+ IMDB title: $VOLUMEID" | tee -a "$HOME"/automediaripper.log; else echo "- Failed IMDB lookup, skipping!" | tee -a "$HOME"/automediaripper.log; return; fi
+
+IMDB_LANG=$($LYNX -source "$IMDB" 2>/dev/null | grep -A2 Language: | sed -n '3p' | sed -e 's/<\/a>//;s/.*>//')
+ORIGINAL_LANG=$($LYNX -dump -nolist http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes | sed 's/^[ \t]*//' | grep -oPm1 "^($(echo $IMDB_LANG | sed -r 's/(.{1}).*/\L\1/')..).*$IMDB_LANG" | cut -d" " -f1)
+
+if [[ $ORIGINAL_LANG ]]; then echo "+ Original language: [$ORIGINAL_LANG]" | tee -a "$HOME"/automediaripper.log; else echo "- Failed IMDB language lookup, skipping!" | tee -a "$HOME"/automediaripper.log; fi
+
+}
+
+function video_grab_tracks {
+
+if [[ ! $INPUT ]]; then INPUT="$DRIVE"; fi
+
+# Use alternative ripping method if Disney DVD was detected
+TITLE_COUNT=$($LSDVD $(if [[ $INPUT ]]; then echo $INPUT; else echo $DRIVE; fi) 2>&1 | grep -oP '(?<=Title: ).*(?=, Length)' | tail -1 | sed 's/^0*//')
+
+if [[ $TITLE_COUNT -gt 60 ]]; then notify; echo "! Detected DVD with spoofed titles, using alternative method (double check results)" | tee -a "$HOME"/automediaripper.log; METHOD="DISNEY"; else METHOD="NORMAL"; fi
+
+if [[ "$MEDIA" = "Blu-ray video" ]]; then METHOD="BLURAY"; fi
+
+case $METHOD in
+NORMAL)
+  # Checking free space on drive
+  check_space
+
+  # Fetching all titles from disc
+  BUFFER=$($HANDBRAKECLI -i "$INPUT" -t0 --scan 2>&1 | tee -a "$TEMPDIR"/HandBrakeCLI.log 2>/dev/null | sed -n '/^+ title [0-9].*/,/^HandBrake has exited./{p}' | sed -e '$d;s/+ title/#\n+ title/g')
+
+  set -- "$BUFFER"
+  OLD_IFS="$IFS"
+  IFS="#"; declare -a DVD_TITLES=($@)
+  IFS="$OLD_IFS"
+
+  for TITLE in "${DVD_TITLES[@]}"; do
+    DVD_TITLE_NO=$(echo $TITLE | grep -o "+ title [0-9].\?" | sed 's/[^0-9]//g')
+    VIDEO_TITLE_DATA[$DVD_TITLE_NO]="$TITLE"
+  done
+
+  # Cycle through all titles and grab their duration
+  for TITLE in "${DVD_TITLES[@]}"; do
+    DVD_TITLE_NO=$(echo $TITLE | grep title | cut -d: -f1 | sed -e 's/[^0-9]*//g')
+    DURATION="$(echo $TITLE | grep -oP '(?<=duration).*(?=size)' | sed 's/: //;s/ +//')"
+    DURATION_MINUTES="$(echo "$DURATION" | cut -d: -f2)"
+    DURATION_HOURS=$(( $(echo "10#$DURATION" | cut -d: -f1|sed 's/^0//')*60 ))
+    DURATION=$(( 10#$DURATION_HOURS+10#$DURATION_MINUTES ))
+    DVD_TITLE_NO_LENGTH[$DVD_TITLE_NO]=$DURATION
+
+  # Grabbing all title between 17 minutes and 1 hour into TV array
+    if [[ $((10#$DURATION_MINUTES)) -gt 17 ]] && [[ $((10#$DURATION_HOURS)) -lt 1 ]]; then DVD_TV_TITLES+=($DVD_TITLE_NO); fi
+  done
+
+  # Checking main feature flag if available and grab declare that title as main
+  MAIN_VIDEO_TITLE=$(echo "${DVD_TITLES[@]}"|grep -B1 "Main Feature"|sed -e 's/[^0-9]//g;$d')
+
+  # Grab the longest title
+  LONGEST_LENGTH=$(echo ${DVD_TV_TITLES[@]}|cut -d" " -f1)
+  for i in "${!DVD_TITLE_NO_LENGTH[@]}"; do (( "${DVD_TITLE_NO_LENGTH[$i]}" > LONGEST_LENGTH )) && LONGEST_LENGTH="${DVD_TITLE_NO_LENGTH[$i]}" LONGEST_TITLE="$i"; done
+
+  # Compare main feature length with longest title, if main is (WAY) shorter, pick the longer one!
+  if [[ $((LONGEST_LENGTH-${DVD_TITLE_NO_LENGTH[$MAIN_VIDEO_TITLE]})) -gt 60 ]]; then MAIN_VIDEO_TITLE=$LONGEST_TITLE; fi
+
+  # If main feature flag is missing, grab the longest title
+  if [[ ! $MAIN_VIDEO_TITLE ]]; then MAIN_VIDEO_TITLE=$LONGEST_TITLE; fi
+
+  # If presumed main title is less than 250 minutes and the TV array end up being a single title, we might have a movie in our hands
+  # On the other hand, if main title is less than an hour and we've got a main feature flag, then it's probably a short film and should be handled as a movie, just be sure there aren't too many TV-length titles on disc
+  if [[ ${DVD_TITLE_NO_LENGTH[$MAIN_VIDEO_TITLE]} -lt 250 ]] && [[ "${#DVD_TV_TITLES[@]}" -lt 2 ]]; then TYPE="MOVIE"
+  elif [[ $MAIN_VIDEO_TITLE ]] && [[ ${DVD_TITLE_NO_LENGTH[$MAIN_VIDEO_TITLE]} -lt 60 ]] && [[ ! ${#DVD_TV_TITLES[@]} -gt 3 ]]; then TYPE="MOVIE"
+  else TYPE="TV"; fi
+
+  ;;
+
+DISNEY|BLURAY)
+  # Checking free space on drive
+  check_space ${METHOD,,}
+
+  # Configure MakeMKV to extract all languages off disc
+  if [[ ! $(grep -oP '(?<=app_DefaultSelectionString = ").*(?=")' "$HOME"/.MakeMKV/settings.conf) = "+sel:all" ]]; then		# If our extracting rule doesn't exist:
+    cp "$HOME"/.MakeMKV/settings.conf "$HOME"/.MakeMKV/settings.bak &>/dev/null 						# 1. Make backup of original settings file
+    sed -i 's/app_DefaultSelectionString = ".*"/app_DefaultSelectionString = "+sel:all"/g' "$HOME"/.MakeMKV/settings.conf	# 2. Insert 'select all' rule
+  fi
+
+  mkdir -p "$TEMPDIR/OUTPUT"
+
+# Grab tracks and duration
+  DVDINFO=$("$MAKEMKVCON" -r info dev:"$DRIVE")
+  DVD_TITLE_LENGTH=($(echo "$DVDINFO"|grep -oP '.*,9,0,".*([0-9]:[0-9][0-9]:[0-9][0-9]).*(?=")'|sed 's/.*"//g'))
+  DVD_TITLES=($(echo ${!DVD_TITLE_LENGTH[@]}))
+  DVD_TV_TITLES=("${DVD_TITLES[@]}")
+
+# Grabbing title length in minutes, grabbing chapters and removing titles that are shorter than 20 minutes to avoid grabbing menu animations
+  for DVD_TITLE in ${DVD_TITLES[@]}; do
+    DVD_TITLE_LENGTH[$DVD_TITLE]=$(( ($(echo ${DVD_TITLE_LENGTH[$DVD_TITLE]}|cut -d: -f1|sed -r 's/^0([0-9])/\1/')*60)+$(echo ${DVD_TITLE_LENGTH[$DVD_TITLE]}|cut -d: -f2|sed -r 's/^0([0-9])/\1/') ))
+    DVD_TITLE_CHAPTERS[$DVD_TITLE]=$(echo "$DVDINFO"|grep -oP "(?<=TINFO:$DVD_TITLE,8,0,\")[0-9]{1,2}(?=\")")
+    if [[ ${DVD_TITLE_LENGTH[$DVD_TITLE]} -lt 20 ]]; then unset DVD_TITLES[$DVD_TITLE] DVD_TITLE_LENGTH[$DVD_TITLE] DVD_TITLE_CHAPTERS[$DVD_TITLE]; fi
+  done
+
+# Is this one of those BBC shows that are WAY too long? (Count 3 because some Disney DVD's have behind-the-scenes documentaries)
+  if [[ ${#DVD_TITLES[@]} -ge 3 ]]; then
+    for DVD_TITLE in ${DVD_TITLES[@]}; do
+      if [[ ${DVD_TITLE_LENGTH[$DVD_TITLE]} -gt 60 ]]; then let FLAG++; fi
+    done
+  fi
+
+  if [[ $FLAG -lt 3 ]]; then
+
+# If not FLAG, grab the longest title that has less than 50 chapters (to avoid behind-the-scenes documentaries that might be longer than the actual movie)
+    LONGEST_LENGTH=$(echo ${DVD_TITLES[@]}|sed -r 's/(^[0-9])\s.*/\1/')
+    for i in "${!DVD_TITLE_LENGTH[@]}"; do if [[ ${DVD_TITLE_CHAPTERS[$i]} -lt 50 ]]; then (( "${DVD_TITLE_LENGTH[$i]}" > LONGEST_LENGTH )) && LONGEST_LENGTH="${DVD_TITLE_LENGTH[$i]}" LONGEST_TITLE="$i"; fi; done
+
+    MAIN_VIDEO_TITLE=$LONGEST_TITLE
+
+    echo "+ Extracting title no. $LONGEST_TITLE..." | tee -a "$HOME"/automediaripper.log
+
+    "$MAKEMKVCON" mkv dev:"$DRIVE" $MAIN_VIDEO_TITLE "$TEMPDIR"/OUTPUT > "$TEMPDIR"/makemkvcon.log 2>&1
+    INPUT=$(echo "$TEMPDIR"/OUTPUT/*)
+    TYPE="MOVIE"
+    MAIN_VIDEO_TITLE=1
+    VIDEO_TITLE_DATA[$MAIN_VIDEO_TITLE]=$("$HANDBRAKECLI" -i "$INPUT" -t0 --scan 2>&1|sed -n '/^+ title [0-9].*/,/^HandBrake has exited./{p}'|sed '$d')
+
+  else
+
+# This is a spoofed TV series box!
+    TYPE=TV
+    TITLESPOOF=1
+
+    echo "+ Extracting ${#DVD_TITLES[@]} titles..." | tee -a "$HOME"/automediaripper.log
+    "$MAKEMKVCON" mkv dev:"$DRIVE" all "$TEMPDIR"/OUTPUT > "$TEMPDIR"/makemkvcon.log 2>&1
+
+    for DVD_TITLE in ${DVD_TITLES[@]}; do
+      BUFFER=$($HANDBRAKECLI -i "$TEMPDIR"/OUTPUT/title$(printf %02d $DVD_TITLE).mkv -t0 --scan 2>&1 | tee -a "$TEMPDIR"/HandBrakeCLI.log 2>/dev/null | sed -n '/^+ title [0-9].*/,/^HandBrake has exited./{p}')
+
+      VIDEO_TITLE_DATA[$DVD_TITLE]="$BUFFER"
+    done
+  fi
+
+  ;;
+
+esac
+
+}
+
+
+
+function video_grab_audiosub {
+declare -gA AUDIO SUBS
+
+for TITLE in $(if [[ "$TYPE" = "MOVIE" ]]; then echo $MAIN_VIDEO_TITLE; else echo ${DVD_TV_TITLES[@]}; fi); do
+
+  # Extract audio track data from DVD title data
+  AUDIO_TRACKS[$TITLE]=$(echo "${VIDEO_TITLE_DATA[$TITLE]}"|sed -n '/ + audio tracks:/,/ + subtitle tracks:/p'|sed -e '1d;$d;s/.*+ //g')
+  SUBS_TRACKS[$TITLE]=$(echo "${VIDEO_TITLE_DATA[$TITLE]}"|sed -n '/ + subtitle tracks:/,/^$/p'|sed -e '1d;$d;s/.*+ //g')
+
+  # Extract audio track languages in the order we want them
+  for LANG in $LANGUAGES; do
+
+    # Checking channels available, prioritize surround over stereo
+    CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -oPm1 "\(DTS-HD MA\)(?=.*(iso639-2: $LANG))")						  # DTS HD MASTER AUDIO
+    if [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -oPm1 "\(DTS\)(?=.*(iso639-2: $LANG))")				  # DTS SURROUND SOUND
+    elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -oPm1 "\(AC3\).*\([0-9].[0-9] ch.*(?=.*(iso639-2: $LANG))")	  # AC3 SURROUND SOUND
+    elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep "\(4.[0-9] ch\).*(iso639-2: $LANG)"|grep -om1 "(4.[0-9] ch)")	  # DISCRETE SURROUND
+    elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep "\(2.[0-9] ch\).*(iso639-2: $LANG)"|grep -om1 "(Dolby Surround)") # DOLBY SURROUND STEREO
+    elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep "\(2.[0-9] ch\).*(iso639-2: $LANG)"|grep -om1 "(2.[0-9] ch)"); fi # DOLBY STEREO
+
+    # Grab audio track if it's not an unwanted dub (usually not track 1)
+    if [[ $(echo "${AUDIO_TRACKS[$TITLE]}"|grep -m1 "$CHANNELS.*(iso639-2: $LANG)"|grep -v "Director") ]]; then
+      CURRENT_AUDIOTRACK=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -m1 "$CHANNELS.*(iso639-2: $LANG)"|grep -v "Director"|cut -d, -f1|sed 's/^.*+ //'|sed -n 1p)
+      CURRENT_AUDIOLANG=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -E "$CURRENT_AUDIOTRACK,"|grep -Eo "$LANG")
+
+      if [[ "$CURRENT_AUDIOLANG" = "$UNWANTED_DUBS" ]]; then					 	 # Oh, oh. Unwanted dub!
+        if [[ "$CURRENT_AUDIOLANG" = "$ORIGINAL_LANG" ]]; then AUDIO[$LANG]="$CURRENT_AUDIOTRACK"	 # OK if audio track matches original language grabbed from IMDb
+        elif [[ $CURRENT_AUDIOTRACK -gt 1 ]]; then :							 # Didn't find original language on IMDb, so if the track isn't first, skip
+        else AUDIO[$LANG]="$CURRENT_AUDIOTRACK"; fi							 # Audio track is first, so let's assume we want this audio track
+      else
+        AUDIO[$LANG]="$CURRENT_AUDIOTRACK"							 	 # Everything looks OK, so let's add track!
+      fi
+
+    fi
+
+  done
+
+  # If we've come this far without finding a requested audio track then grab the first track (DTS HD MA/5.1 prioritized if available)
+  CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -om1 "(DTS-HD MA)")
+  if [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -om1 "(DTS)")
+  elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -om1 "(AC3)")
+  elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -om1 "(4.[0-9] ch)")
+  elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -om1 "(Dolby Surround)")
+  elif [[ ! $CHANNELS ]]; then CHANNELS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -om1 "(2.[0-9] ch)"); fi
+
+  if [[ ${#AUDIO[@]} -eq 0 ]]; then AUDIOTRACKS=$(echo "${AUDIO_TRACKS[$TITLE]}"|grep -m1 "$CHANNELS"|grep -v "Director"|cut -d, -f1|sed 's/^.*+ //'|sed -n 1p); fi
+
+  # Extract wanted subtitles
+  NATIVE_SUBS=$(echo "${SUBS_TRACKS[$TITLE]}"|grep $NATIVE|cut -d, -f1|sed 's/^.*+ //'|sed -n 1p)
+  SECONDARY_SUBS=$(echo "${SUBS_TRACKS[$TITLE]}"|grep $SECONDARY|cut -d, -f1|sed 's/^.*+ //'|sed -n 1p)
+
+  # If there's foreign audio tracks, grab native subtitles if available. If not, then use secondary language subtitles unless it matches the only audio track
+  # If the only audio track is native, then remove subtitles
+  if [[ ! ${!AUDIO[@]} = "$NATIVE" ]]; then
+    if [[ $NATIVE_SUBS ]]; then SUBS[$NATIVE]="$NATIVE_SUBS"
+    elif [[ ! ${!AUDIO[@]} = "$SECONDARY" ]]; then SUBS[$SECONDARY]="$SECONDARY_SUBS"; fi
+  else unset SUBS
+  fi
+
+  # Create our track strings for HandBrake
+  for LANG in $LANGUAGES; do if [[ ${AUDIO[$LANG]} ]]; then AUDIOTRACKS+="${AUDIO[$LANG]},"; fi; done
+
+  AUDIOTRACKS="${AUDIOTRACKS%,}"
+  DEFAULT_SUBTITLE=$(if [[ "${SUBS[$NATIVE]}" ]]; then echo "$NATIVE"; elif [[ "${SUBS[$SECONDARY]}" ]]; then echo "$SECONDARY"; fi)
+
+  # Populate argument string
+  LANGARGS[$TITLE]="-a $AUDIOTRACKS $(if [[ "$PASSTHRU" -eq 1 ]]; then DOWNMIX=0; echo "-E copy --audio-fallback fdk_aac"; fi) $(if [[ "${SUBS[@]}" ]]; then echo "-s ${SUBS[@]}"; fi) $(if [[ "${SUBS[$NATIVE]}" ]]; then echo "--subtitle-default ${SUBS[$NATIVE]} -n $NATIVE"; elif [[ "${SUBS[$SECONDARY]}" ]]; then echo "--subtitle-default ${SUBS[$SECONDARY]} -n $SECONDARY"; fi)"
+
+echo "+ Extracting audio track(s) [${!AUDIO[@]}] $(if [[ ${!SUBS[@]} ]]; then echo "and subtitle [${!SUBS[@]}] "; fi)from title $TITLE" | tee -a "$HOME"/automediaripper.log;
+
+unset AUDIOTRACKS
+done
+
+# Downmix everything or not?
+if [[ "$DOWNMIX" -eq 1 ]]; then
+  AUDIOTRACK_COUNT=$(echo "${AUDIOTRACKS}"|tr ',' '\n'|wc -l)
+
+  if [[ "$AUDIOTRACK_COUNT" -gt 1 ]]; then
+    for i in $(seq 1 "$AUDIOTRACK_COUNT"); do ENCODERMD+="faac,"; TRACKMD+="dpl2,"; done
+    EXTRAARGS_TV+=" -E ${ENCODERMD%,} -6 ${TRACKMD%,}"
+    EXTRAARGS_MOVIE+=" -E ${ENCODERMD%,} -6 ${TRACKMD%,}"
+  else
+    EXTRAARGS_TV+=" -E faac -6 dpl2"
+    EXTRAARGS_MOVIE+=" -E faac -6 dpl2"
+  fi
+
+  echo "+ Downmixing audio track(s) to Dolby Pro Logic II." | tee -a "$HOME"/automediaripper.log
+fi
+
+
+}
+
+
+function convert_video {
+CONVERT_STRING="$VOLUMEID$(if [[ $SEASON ]]; then echo " Season $SEASON"; fi)"
+echo "+ Converting: '$CONVERT_STRING'" | tee -a "$HOME"/automediaripper.log
+
+# Setting command line arguments from settings
+
+#Importing preset
+declare -A PRESETS
+PRESETS[TV]="$HBPRESET_TV"
+PRESETS[MOVIE]="$HBPRESET_MOVIE"
+PRESET="${PRESETS[$TYPE]}"
+
+# Quality value
+case $TV_QUALITY in
+  high|High) QUALITY="-q 20" ;;
+  medium|Medium) QUALITY="-q 22" ;;
+  low|Low) QUALITY="-q 24" ;;
+esac
+
+case $MOVIE_QUALITY in
+  high|High) QUALITY="-q 20" ;;
+  medium|Medium) QUALITY="-q 22" ;;
+  low|Low) QUALITY="-q 24" ;;
+esac
+
+
+# Start our job!
+case $TYPE in
+
+# TV series
+TV)
+  echo "1:${#DVD_TV_TITLES[@]}:${#DVD_TV_TITLES[@]}" > "$TEMPDIR"/job
+  if [[ ! $TITLESPOOF ]]; then INPUT="$DRIVE"; fi
+
+  OUTPUT="$TEMPDIR/$VOLUMEID/Season $SEASON"
+  SOURCE="$TEMPDIR/$VOLUMEID"
+  DESTINATION="$OUTPUT_TV/${OUTPUT#${TEMPDIR}*/}"
+  COPYARGS="-RTP"
+  mkdir -p "$OUTPUT"
+
+  if [[ -d "$DESTINATION" ]]; then
+    EPISODE_COUNT=$(( $(echo "$DESTINATION"/* 2>/dev/null|grep -Eo '(E[[:digit:]]*\b|EPISODE_[[:digit:]]*)'|sed '$!d;s/EPISODE_//g;s/E//g;s/^0*//')+1 ))
+    else EPISODE_COUNT=1
+  fi
+
+  for TITLE in "${DVD_TV_TITLES[@]}"; do
+    if [[ "$SEASON" =~ [0-9] ]]; then
+      OUTPUT_FILENAME="$OUTPUT/$VOLUMEID-S$(printf %02d $SEASON)E$(printf %02d $EPISODE_COUNT).mkv"
+    else
+      OUTPUT_FILENAME="$OUTPUT/$VOLUMEID-S${SEASON}E$(printf %02d $EPISODE_COUNT).mkv"
+    fi
+
+    CURRENTJOB=$(cat "$TEMPDIR"/job|cut -d: -f1)
+    TOTALJOBS=$(cat "$TEMPDIR"/job|cut -d: -f2)
+    REMAININGJOBS=$(cat "$TEMPDIR"/job|cut -d: -f3)
+
+    if [[ ! $TITLESPOOF ]]; then
+      echo "CMDLINE: \"$HANDBRAKECLI\" -i \"$INPUT\" -o \"$OUTPUT_FILENAME\" -t$TITLE -Z \"$PRESET\" \"$QUALITY\" $EXTRAARGS_TV ${LANGARGS[$TITLE]}" >> "$HOME"/automediaripper.log 
+      "$HANDBRAKECLI" -i "$INPUT" -o "$OUTPUT_FILENAME" -t$TITLE -Z "$PRESET" "$QUALITY" $EXTRAARGS_TV ${LANGARGS[$TITLE]} >> "$TEMPDIR"/HandBrakeCLI.log 2>&1
+    else
+        echo "CMDLINE: \"$HANDBRAKECLI\" -i \"$TEMPDIR\"/OUTPUT/title$(printf %02d $TITLE).mkv -o \"$OUTPUT_FILENAME\" -Z \"$PRESET\" \"$QUALITY\" $EXTRAARGS_TV ${LANGARGS[$TITLE]}" >> "$HOME"/automediaripper.log 
+        "$HANDBRAKECLI" -i "$TEMPDIR"/OUTPUT/title$(printf %02d $TITLE).mkv -o "$OUTPUT_FILENAME" -Z "$PRESET" "$QUALITY" $EXTRAARGS_TV ${LANGARGS[$TITLE]} >> "$TEMPDIR"/HandBrakeCLI.log 2>&1
+    fi
+
+    if [[ $CURRENTJOB -lt $TOTALJOBS ]]; then
+      echo "$(( CURRENTJOB + 1 )):$TOTALJOBS:$(( REMAININGJOBS - 1 ))" > "$TEMPDIR"/job
+      let EPISODE_COUNT++
+    fi
+  done
+
+  if [[ $? = 0 ]]; then cleanup; else error; fi
+
+  mkdir -p "$DESTINATION"
+;;
+
+# If MOVIE, grab and convert main feature (or longest title)
+MOVIE)
+  echo "1:1:1" > "$TEMPDIR"/job
+
+  if [[ ! $INPUT ]]; then INPUT="$DRIVE"; fi
+  OUTPUT="$TEMPDIR/$VOLUMEID.mkv"
+  SOURCE="$TEMPDIR/$VOLUMEID.mkv"
+  DESTINATION="$OUTPUT_DVD"
+
+# If OUTPUT already exists, let's assume it's a multidisc DVD and number the output files
+  OUTPUT_FILENAME=$(basename "$OUTPUT")
+  OUTPUT_MULTI=$(ls $DESTINATION/${OUTPUT_FILENAME%.*}-disc*.mkv 2> /dev/null|tail -1)
+  OUTPUT_MULTICNT=$(echo "$OUTPUT_MULTI"|grep -oP '(?<=-disc).*(?=.mkv)')
+
+  if [[ -f "$DESTINATION"/$(basename "$OUTPUT") ]]; then
+    echo "! Previous filename already exist, assuming multiple discs" | tee -a "$HOME"/automediaripper.log
+    mv "$DESTINATION/$OUTPUT_FILENAME" "$DESTINATION/${OUTPUT_FILENAME%.*}-disc1.mkv"
+    OUTPUT="${OUTPUT_FILENAME%.*}-disc2.mkv"
+  elif [[ -e $OUTPUT_MULTI ]]; then
+    echo "! Multiple disc set found, appending file to set" | tee -a "$HOME"/automediaripper.log
+    OUTPUT="${OUTPUT%.*}-disc$((OUTPUT_MULTICNT+1)).mkv"
+  fi
+
+  unset COPYARGS
+
+  echo "1:1:1" > "$TEMPDIR"/job
+
+  echo "+ CMDLINE: \"$HANDBRAKECLI\" -i \"$INPUT\" -o \"$OUTPUT\" -t$MAIN_VIDEO_TITLE -Z \"$PRESET\" \"$QUALITY\" $EXTRAARGS_MOVIE ${LANGARGS[$MAIN_VIDEO_TITLE]}" >> "$HOME"/automediaripper.log
+
+  "$HANDBRAKECLI" -i "$INPUT" -o "$OUTPUT" -t$MAIN_VIDEO_TITLE -Z "$PRESET" "$QUALITY" $EXTRAARGS_MOVIE ${LANGARGS[$MAIN_VIDEO_TITLE]} >> "$TEMPDIR"/HandBrakeCLI.log 2>&1
+
+# Downlscaling Blu-ray in future release when either HandBrake or Plex fixes the subtitle issue
+#$(if [[ "$DOWNSCALE" -eq 1 ]] && [[ "$RESOLUTION" -eq 1080 ]]; then echo "-X 1280 -Y 720 "; fi)
+
+  if [[ $? = 0 ]]; then cleanup; else error; fi
+
+;;
+
+esac
+
+}
+
+
+### AUDIO RIPPING SECTION #########
+
+function rip_cd {
+# Ugly workaround since icedax won't write to specified directory for some reason
+OLDPWD=$(pwd)
+cd "$TEMPDIR"
+
+TRACKS_CD=$("$ICEDAX" -D "$DRIVE" -J -verbose-level toc 2>&1|sed -n '1N;/CDINDEX[^\n]*$/P;N;D'|sed -r 's/.*,?\s([0-9]{1,2}).\(\s?[0-9]{1,2}:[0-9][0-9].[0-9][0-9]\)$/\1/g')
+
+# Rip CD
+echo "+ Ripping CD" | tee -a "$HOME"/automediaripper.log
+"$ICEDAX" -D "$DRIVE" -L1 -B >> "$TEMPDIR"/icedax.log 2>&1
+
+cd "$OLDPWD"
+}
+
+
+
+function grab_cd_info {
+# Grabbing album information for inserting into tags
+AUDIO_CDDB="$TEMPDIR/audio.cddb"
+
+ARTIST=$(grep -oP '(?<=DTITLE=).*' "$AUDIO_CDDB"|sed 's/ \/ /;/'|cut -d";" -f1|sed 's/\(.*\)/\L\1/'|sed -r 's/\b(.)/\U\1/g')
+ALBUM=$(grep -oP '(?<=DTITLE=).*' "$AUDIO_CDDB"|sed 's/ \/ /;/'|cut -d";" -f2|sed 's/\(.*\)/\L\1/'|sed -r 's/\b(.)/\U\1/g'|sed 's/\[\([^]]*\)\]/\(\1\)/g')
+GENRE=$(grep -oP '(?<=DGENRE=).*' "$AUDIO_CDDB"|sed 's/\r//g')
+YEAR=$(grep -oP '(?<=DYEAR=).*' "$AUDIO_CDDB"|sed 's/\r//g')
+
+OLDIFS="$IFS"
+IFS="
+"
+TRACKS+=($(grep -oPR1 '(?<=TTITLE).*' "$AUDIO_CDDB"|sed 's/^[0-9].*=//g;s/\r//g'|sed 's/\//-/g'))
+IFS="$OLDIFS"
+
+if [[ $ALBUM ]]; then
+  OUTPUT="$TEMPDIR/$ARTIST - $ALBUM"
+  mkdir -p "$OUTPUT"
+  echo "+ Downloading album art" | tee -a "$HOME"/automediaripper.log
+  $GLYRC cover --artist "$ARTIST" --album "$ALBUM" -w "$OUTPUT/folder.:format:" &>/dev/null
+  COVERART=$(ls "$OUTPUT"/folder.*)
+fi
+
+if [[ ! $ALBUM ]]; then
+  echo "! CDDB parsing failed, you will have to rename and tag the files yourself!" | tee -a "$HOME"/automediaripper.log
+  notify
+  OUTPUT="$TEMPDIR/MUSIC_ALBUM"
+  mkdir -p "$OUTPUT"
+fi
+
+}
+
+
+
+function convert_audio {
+# Compress our WAV files using encoder of our choice
+echo "+ Converting $(if [[ $ALBUM ]]; then echo "'$ARTIST - $ALBUM' "; fi)to ${MUSIC_FORMAT^^}" | tee -a "$HOME"/automediaripper.log
+
+i=0
+TOTALTRACKS=$(printf %02d%s ${#TRACKS[@]})
+SOURCE="$OUTPUT"
+DESTINATION=$OUTPUT_CD/$(basename "$OUTPUT")
+
+for INPUT in $TEMPDIR/*.wav; do
+  TRACKNO=$(printf %02d%s $((i+1)))
+  if [[ $ALBUM ]]; then OUTPUT_FILE="$OUTPUT/$TRACKNO-$ARTIST - ${TRACKS[$i]}.${MUSIC_FORMAT,,}"
+  else OUTPUT_FILE="$OUTPUT/track_$TRACKNO.${MUSIC_FORMAT,,}"; fi
+
+  echo "+ Encoding $TRACKNO/$TOTALTRACKS" | tee -a "$HOME"/automediaripper.log
+
+  case ${MUSIC_FORMAT^^} in
+    MP3)
+    case ${MUSIC_QUALITY^^} in
+      LOW) LAME_SETTINGS="-b 96" ;;
+      MEDIUM) LAME_SETTINGS="-V 4" ;;
+      HIGH) LAME_SETTINGS="-b 320" ;;
+    esac
+    
+    "$LAME" "$LAME_SETTINGS" --tn "$TRACKNO"/"$TOTALTRACKS" --tt "${TRACKS[$i]}" --ta "$ARTIST" --tl "$ALBUM" --ty "$YEAR" --tg "$GENRE" --ti "$COVERART" "$INPUT" "$OUTPUT_FILE" --nohist &> "$TEMPDIR"/lame.log
+    ;; 
+
+
+    OGG)
+    case ${MUSIC_QUALITY^^} in
+      LOW) OGG_SETTINGS="-q 2" ;;
+      MEDIUM) OGG_SETTINGS="-q 5" ;;
+      HIGH) OGG_SETTINGS="-q 10" ;;
+    esac
+
+    "$OGGENC" "$OGG_SETTINGS" -N "$TRACKNO" -t "${TRACKS[$i]}" -a "$ARTIST" -l "$ALBUM" -d "$YEAR" -G "$GENRE" "$INPUT" -o "$OUTPUT_FILE" > "$TEMPDIR"/ogg.log 2>&1
+
+    # Adding embedded cover art, good thing Vorbis has this function built right in (sarcasm) - Got from superuser.com and user Biapy
+    if [[ "$COVERART" ]]; then
+      IMAGEMIME=$(file --mime-type "$COVERART"|grep -oP 'image/[jpeg|png].*')
+
+      if [[ $IMAGEMIME = "image/jpeg" ]] || [[ $IMAGEMIME = "image/png" ]]; then
+ 
+        # Grabbing existing comments into a easily parsable file
+        $VORBISCOMMENT --list --raw "$OUTPUT_FILE" > "$TEMPDIR"/oggcomments.tmp
+
+        # Writing image header
+        local DESCRIPTION="Front Cover"
+        local IMAGEHEADER="$TEMPDIR/imageheader.tmp"
+        printf "0: %.8x" 3|xxd -r -g0 >> "$IMAGEHEADER"
+        printf "0: %.8x" $(echo -n "$IMAGEMIME"|wc -c)|xxd -r -g0 >> "$IMAGEHEADER"
+        echo -n "$IMAGEMIME" >> "$IMAGEHEADER"
+        printf "0: %.8x" $(echo -n "$DESCRIPTION"|wc -c)|xxd -r -g0 >> "$IMAGEHEADER"
+        echo -n "$DESCRIPTION" >> "$IMAGEHEADER"
+        printf "0: %.8x" 0|xxd -r -g0 >> "$IMAGEHEADER"
+        printf "0: %.8x" 0|xxd -r -g0 >> "$IMAGEHEADER"
+        printf "0: %.8x" 0|xxd -r -g0 >> "$IMAGEHEADER"
+        printf "0: %.8x" 0|xxd -r -g0 >> "$IMAGEHEADER"
+        printf "0: %.8x" $(wc -c "$COVERART"|cut --delimiter=" " --fields=1)|xxd -r -g0 >> "$IMAGEHEADER"
+        cat "$COVERART" >> "$IMAGEHEADER"
+
+        # Combining header and image using base64 (binary to text?) encoding and write to OGG tag
+        echo "metadata_block_picture=$(base64 --wrap=0 < $IMAGEHEADER)" >> "$TEMPDIR"/oggcomments.tmp
+        "$VORBISCOMMENT" --write --raw --commentfile "$TEMPDIR"/oggcomments.tmp "$OUTPUT_FILE"
+        rm $IMAGEHEADER
+      fi
+
+    fi
+    ;;
+  
+    FLAC)
+    case ${MUSIC_QUALITY^^} in
+      LOW) FLAC_SETTINGS="-2" ;;
+      MEDIUM) FLAC_SETTINGS="-4" ;;
+      HIGH) FLAC_SETTINGS="-8" ;;
+    esac
+
+    "$FLAC" "$FLAC_SETTINGS" -T TRACKNUMBER="$TRACKNO" -T TITLE="${TRACKS[$i]}" -T ARTIST="$ARTIST" -T ALBUM="$ALBUM" -T DATE="$YEAR" -T GENRE="$GENRE" --picture="$COVERART" "$INPUT" -o "$OUTPUT_FILE" > "$TEMPDIR"/flac.log 2>&1
+    ;;
+
+  esac
+
+# Creating a simple playlist...
+  echo $(basename "$OUTPUT_FILE") >> "$OUTPUT/$(if [[ $ALBUM ]]; then echo "$ARTIST - $ALBUM"; else echo "playlist"; fi).m3u"
+  let i++
+done
+
+COPYARGS="-RTP"
+
+if [[ $? = 0 ]]; then cleanup; else error; fi
+
+}
+
+
+
+# BEGIN MAIN PROGRAM
+
+automediaripper_config
+. "$HOME/.automediaripperrc"
+
+case $1 in
+-h|--help)
+echo "Usage: Pop in a disc and run! (Optional: Input file)"
+exit 0
+;;
+
+*)
+if [[ $1 ]]; then INPUT="$(pwd $1)/$(basename "$1")"; fi
+;;
+
+esac
+
+prerequisites
+check_drive
+
+case $MEDIA in
+  "DVD video"|"Blu-ray video"|"File")
+    start_notification
+    video_grab_tracks
+    video_identify
+    video_imdb_lookup
+    video_grab_audiosub
+    convert_video
+  ;;
+
+  "CDDA")
+    start_notification
+    rip_cd
+    grab_cd_info
+    convert_audio
+  ;;
+
+esac
